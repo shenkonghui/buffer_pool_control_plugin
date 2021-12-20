@@ -6,6 +6,8 @@
 #include "item.h"
 #include <cstring>
 #include "mysql.h"
+#include "buffer_pool_control.h"
+#include "memory.h"
 
 #define HEART_STRING_BUFFER 100
 static MYSQL_PLUGIN plugin_info_ptr;
@@ -49,7 +51,8 @@ void *mysql_heartbeat(void *p)
 
     while (1)
     {
-        sleep(5);
+        sleep(10);
+        set_buffer_pool_size();
 
         result = time(NULL);
         localtime_r(&result, &tm_tmp);
@@ -68,7 +71,13 @@ void *mysql_heartbeat(void *p)
     return 0;
 }
 
-void set(){
+void set_buffer_pool_size(){
+    // // 最大允许的bufffer_pool
+    // uint64_t max_innodb_buffer_pool_size = 2048ULL * 1024 * 1024;
+    // // 最小允许的bufffer_pool
+    // uint64_t min_innodb_buffer_pool_size = 128ULL * 1024 * 1024;
+    // // 内存少于256MB触发缩容防止OOM
+    // uint64_t min_avaliable_mem = 256ULL * 1024 * 1024;
     MYSQL mysql = MYSQL();
     MYSQL *res = mysql_init(&mysql);
     if (!(mysql_real_connect(res, "127.0.0.1", "root",
@@ -78,8 +87,20 @@ void set(){
         my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "mysql_close");
         mysql_close(res);
     }
-    const char *query = " SET GLOBAL innodb_buffer_pool_size=456*1024*1024;";
-    if (!mysql_query(res, query))
+    Memory mem = getMemoryInfo();
+
+    const char *seletBufferPool = "select @ @innodb_buffer_pool_size;" if (!mysql_query(res, seletBufferPool))
+    {
+        my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "select @ @innodb_buffer_pool_size failed");
+    }
+
+    const char *query = "ser global innodb_buffer_pool_size=%llu;";
+    unsigned long long int setbufferPool = (static_cast<unsigned long long int>(mem.MemTotal * 0.7)) * 1024;
+    char buf[1024];
+    sprintf(buf,query,setbufferPool);
+    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "MemTotal = %llu, set bufferpool = %llu", mem.MemTotal * 1024, setbufferPool);
+
+    if (!mysql_query(res, buf))
     {
         my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "set innodb_buffer_pool_size failed");
     }
@@ -112,8 +133,6 @@ static int buffer_pool_control_plugin_init(MYSQL_PLUGIN plugin_info)
         exit(0);
     }
     return 0;
-
-    // plugin->data = (void *)con;
 }
 
 static int buffer_pool_control_plugin_deinit(void *p)
