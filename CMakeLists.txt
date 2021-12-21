@@ -20,8 +20,6 @@ INCLUDE_DIRECTORIES(
   ${CMAKE_SOURCE_DIR}/libmysql
 )
 
-MYSQL_ADD_PLUGIN(buffer_pool_control buffer_pool_control.cc memory.cc
-  MODULE_ONLY TEST_ONLY MODULE_OUTPUT_NAME "buffer_pool_control")
-
+MYSQL_ADD_PLUGIN(buffer_pool_control buffer_pool_control.cc memory.cc MODULE_ONLY TEST_ONLY MODULE_OUTPUT_NAME "buffer_pool_control")
 
 TARGET_LINK_LIBRARIES(buffer_pool_control libmysql mysys)

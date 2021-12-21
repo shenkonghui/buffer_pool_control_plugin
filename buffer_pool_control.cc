@@ -8,6 +8,7 @@
 #include "mysql.h"
 #include "buffer_pool_control.h"
 #include "memory.h"
+#include <string>
 
 #define HEART_STRING_BUFFER 100
 static MYSQL_PLUGIN plugin_info_ptr;
@@ -43,7 +44,7 @@ PSI_memory_key key_memory_mysql_context;
 
 void *mysql_heartbeat(void *p)
 {
-
+    DBUG_ENTER("mysql_heartbeat");
     // struct mysql_heartbeat_context *con = (struct mysql_heartbeat_context *)p;
     char buffer[HEART_STRING_BUFFER];
     time_t result;
@@ -53,7 +54,6 @@ void *mysql_heartbeat(void *p)
     {
         sleep(10);
         set_buffer_pool_size();
-
         result = time(NULL);
         localtime_r(&result, &tm_tmp);
         my_snprintf(buffer, sizeof(buffer),
@@ -78,33 +78,58 @@ void set_buffer_pool_size(){
     // uint64_t min_innodb_buffer_pool_size = 128ULL * 1024 * 1024;
     // // 内存少于256MB触发缩容防止OOM
     // uint64_t min_avaliable_mem = 256ULL * 1024 * 1024;
+
     MYSQL mysql = MYSQL();
     MYSQL *res = mysql_init(&mysql);
+    MYSQL_RES *result;
+    MYSQL_ROW row;
+    unsigned long long int currBufferPoolSize = 0;
+    static char *opt_unix_socket = 0;
     if (!(mysql_real_connect(res, "127.0.0.1", "root",
                              "123456", "mysql", 3307,
-                             NULL, 0)))
+                             opt_unix_socket, 0)))
     {
-        my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "mysql_close");
+        my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "mysql  connect failed , close");
         mysql_close(res);
+        return;
     }
     Memory mem = getMemoryInfo();
 
-    const char *seletBufferPool = "select @ @innodb_buffer_pool_size;" if (!mysql_query(res, seletBufferPool))
+    // 查询当前bufferpool的值
+    const char *seletBufferPool = "select @@innodb_buffer_pool_size;";
+    mysql_query(res, seletBufferPool);
+    result = mysql_store_result(res);
+    int num_fields = mysql_num_fields(result);
+    while ((row = mysql_fetch_row(result)))
     {
-        my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "select @ @innodb_buffer_pool_size failed");
+        ulong *lengths = mysql_fetch_lengths(result);
+        for (int i = 0; i < num_fields; i++)
+        {
+            if (row[i]){
+                currBufferPoolSize = atoll(row[i]);
+                break;
+            }
+            my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "[%.*s] ", (int)lengths[i],
+                                    row[i] ? row[i] : "NULL");
+        }
     }
 
-    const char *query = "ser global innodb_buffer_pool_size=%llu;";
+    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "currBufferPoolSize = %llu", currBufferPoolSize);
+    mysql_free_result(result);
+
+    // 设置bufferpool
+    const char *query = "set global innodb_buffer_pool_size=%llu;";
     unsigned long long int setbufferPool = (static_cast<unsigned long long int>(mem.MemTotal * 0.7)) * 1024;
-    char buf[1024];
-    sprintf(buf,query,setbufferPool);
-    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "MemTotal = %llu, set bufferpool = %llu", mem.MemTotal * 1024, setbufferPool);
-
-    if (!mysql_query(res, buf))
+    if (setbufferPool > currBufferPoolSize )
     {
-        my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "set innodb_buffer_pool_size failed");
+        char buf[1024];
+        sprintf(buf, query, setbufferPool);
+        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, " MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
+        mysql_query(res, buf);
+        mysql_close(res);
+    }else{
+        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "Nothing, MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
     }
-    mysql_close(res);
 }
 
 static int buffer_pool_control_plugin_init(MYSQL_PLUGIN plugin_info)
