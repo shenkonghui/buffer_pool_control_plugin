@@ -1,23 +1,31 @@
+#include "buffer_pool_control.h"
+#include "auth/sql_authorization.h"
 #include <my_sys.h>
 #include <mysql/plugin.h>
 #include "my_thread.h"
-#include "sql_class.h"
+#include "mysql/psi/mysql_thread.h"
+#include <sql_class.h>
+#include <sql_db.h>
+#include <sql_lex.h>
 #include "set_var.h"
 #include "item.h"
 #include <cstring>
 #include "mysql.h"
-#include "buffer_pool_control.h"
 #include "memory.h"
 #include <string>
+#include<sql_base.h>
+#include "sql_parse.h"
+#include "probes_mysql.h"
+#include <m_string.h>
 
 #define HEART_STRING_BUFFER 100
-static MYSQL_PLUGIN plugin_info_ptr;
-
+    static MYSQL_PLUGIN plugin_info_ptr;
+THD* thd = NULL;
 /* 系统配置变量 */
 // 是否开启
 static bool enabled;
 // 控制时间间隔, 单位秒
-// static int buffer_pool_control_interval;
+// static uint buffer_pool_control_interval;
 // // 最小内存
 // static char *buffer_pool_control_min;
 // // 最大内存
@@ -31,6 +39,17 @@ static MYSQL_THDVAR_BOOL(enabled,
                          1     /* default */
 );
 
+// static MYSQL_THDVAR_UINT(buffer_pool_control_interval,
+//                          PLUGIN_VAR_RQCMDARG,
+//                          "buffer_pool_control_interval",
+//                          NULL, /* check func. */
+//                          NULL, /* update func. */
+//                          30 ,
+//                          10,
+//                          60 * 60 * 24,
+//                          1
+// );
+
 static struct st_mysql_sys_var *buffer_pool_control_system_variables[] = {
     MYSQL_SYSVAR(enabled),
     NULL};
@@ -38,9 +57,92 @@ static struct st_mysql_sys_var *buffer_pool_control_system_variables[] = {
 struct buffer_pool_control_context
 {
     my_thread_handle control_thread;
+    THD *thd;
 };
 
 PSI_memory_key key_memory_mysql_context;
+
+static mysql_mutex_t g_record_buffer_mutex;
+
+/**
+ * @brief 执行命令前处理,
+ *
+ * @param thd
+ * @param query
+ * @param db
+ * @return my_bool
+ */
+my_bool prepare_execute_command(THD *thd, const char *query, const char *db)
+{
+    thd->security_context()->set_master_access(SUPER_ACL);
+    Parser_state parser_state;
+    struct st_mysql_const_lex_string new_db;
+    new_db.str = db;
+    new_db.length = strlen(db);
+    thd->reset_db(new_db);
+    alloc_query(thd, query, strlen(query));
+
+    if (parser_state.init(thd, thd->query().str, thd->query().length))
+    {
+        return FALSE;
+    }
+    mysql_reset_thd_for_next_command(thd);
+    lex_start(thd);
+    thd->m_parser_state = &parser_state;
+    thd->m_parser_state = NULL;
+    bool err = thd->get_stmt_da()->is_error();
+
+    err = parse_sql(thd, &parser_state, NULL);
+
+    return !err;
+}
+
+/**
+ * @brief 执行命令后的处理
+ *
+ * @param bdq_backup_thd
+ */
+void after_execute_command(THD *bdq_backup_thd)
+{
+    bdq_backup_thd->mdl_context.release_statement_locks();
+    bdq_backup_thd->mdl_context.release_transactional_locks();
+    bdq_backup_thd->lex->unit->cleanup(true);
+    close_thread_tables(bdq_backup_thd);
+    bdq_backup_thd->end_statement();
+    bdq_backup_thd->cleanup_after_query();
+    bdq_backup_thd->reset_db(NULL_CSTR);
+    bdq_backup_thd->reset_query();
+    bdq_backup_thd->proc_info = 0;
+    // free_root(bdq_backup_thd->mem_root,MYF(MY_KEEP_PREALLOC));
+}
+void init_thd(){
+    /**
+     * 注册线程到全局线程, 模拟客户端连接过程
+     */
+    my_thread_init();
+    thd = new THD;
+    THD *stack_thd = thd;
+    mysql_mutex_lock(&g_record_buffer_mutex);
+    thd->set_new_thread_id();
+    mysql_mutex_unlock(&g_record_buffer_mutex);
+    thd->thread_stack = (char *)&stack_thd;
+    thd->store_globals();
+    // thd->want_privilege = GRANT_TABLES;
+    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "bpc_thd: %p", thd);
+}
+
+int exec_command(const char *query)
+{
+    int result;
+    prepare_execute_command(thd, query, "mysql");
+    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "sql type: %d", thd->lex->sql_command);
+    result = mysql_execute_command(thd, true);
+    da = thd->get_stmt_da();
+    thd->get_stacked_da();
+
+    after_execute_command(thd);
+    return result;
+}
 
 void *mysql_heartbeat(void *p)
 {
@@ -49,11 +151,13 @@ void *mysql_heartbeat(void *p)
     char buffer[HEART_STRING_BUFFER];
     time_t result;
     struct tm tm_tmp;
-
+    sleep(10);
+    init_thd();
+    exec_command("select @@innodb_buffer_pool_size");
     while (1)
     {
         sleep(10);
-        set_buffer_pool_size();
+        // set_buffer_pool_size();
         result = time(NULL);
         localtime_r(&result, &tm_tmp);
         my_snprintf(buffer, sizeof(buffer),
@@ -66,6 +170,7 @@ void *mysql_heartbeat(void *p)
                     tm_tmp.tm_sec);
         my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "%s", buffer);
         // my_write(con->heartbeat_file, (uchar *)buffer, strlen(buffer), MYF(0));
+
     }
 
     return 0;
@@ -134,12 +239,16 @@ void set_buffer_pool_size(){
 
 static int buffer_pool_control_plugin_init(MYSQL_PLUGIN plugin_info)
 {
+    mysql_mutex_init(PSI_NOT_INSTRUMENTED,
+                     &g_record_buffer_mutex,
+                     MY_MUTEX_INIT_FAST);
+
     plugin_info_ptr = plugin_info;
     my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "buffer_pool_control_plugin_init");
     my_thread_attr_t attr; /* Thread attributes */
 
+    // bpc_thd = (THD *)my_get_thread_local(THR_THD);
     struct buffer_pool_control_context *con;
-
 
     my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "create thread");
     plugin_info_ptr = plugin_info;
