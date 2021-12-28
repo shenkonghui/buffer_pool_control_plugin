@@ -2,8 +2,10 @@
 
 struct Memory
 {
-    uint64_t MemTotal;
-    uint64_t MemAvailable;
+    int64_t MemTotal;
+    int64_t MemUsage;
+    int64_t MemAvailable;
 };
 
 Memory getMemoryInfo();
+Memory getMemoryInfoInDocker();

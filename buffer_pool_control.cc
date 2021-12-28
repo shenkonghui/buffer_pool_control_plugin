@@ -199,27 +199,35 @@ void *mysql_heartbeat(void *p)
 // 自动设置buffer pool
 void set_buffer_pool_size_new()
 {
-    // 获取当前系统的内存情况
-    Memory mem = getMemoryInfo();
+    Memory mem;
+    if (getpid() == 1){
+        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "getMemoryInfoInDocker");
+        mem = getMemoryInfoInDocker();
+    }else{
+        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "getMemoryInfo");
+        mem = getMemoryInfo();
+    }
 
-    unsigned long long int currBufferPoolSize = 0;
+    assert(mem.MemTotal > 0);
+
+    long long int currBufferPoolSize = 0;
     // 查询mysql中的innodb_buffer_pool_size指标
     char* result = show_var("innodb_buffer_pool_size");
     currBufferPoolSize = atoll(result);
     my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "currBufferPoolSize = %llu", currBufferPoolSize);
 
     const char *query = "set global innodb_buffer_pool_size=%llu;";
-    unsigned long long int setbufferPool = (static_cast<unsigned long long int>(mem.MemTotal * 0.7)) * 1024;
+     long long int setbufferPool = (static_cast<long long int>(mem.MemTotal * 0.7)) * 1024;
 
     if (setbufferPool - currBufferPoolSize > 1024 * 1024 * 128 || currBufferPoolSize - setbufferPool  > 1024 * 1024 * 128) {
         char buf[1024];
         sprintf(buf, query, setbufferPool);
-        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, " MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
+        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, " MemTotal = %lld, set bufferpool = %lld, currBufferPoolSize= %lld ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
         exec_command(buf);
    }
    else
    {
-       my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "Nothing, MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
+       my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "Nothing, MemTotal = %lld, set bufferpool = %lld, currBufferPoolSize= %lld ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
    }
 }
 

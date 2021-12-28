@@ -37,3 +37,32 @@ Memory getMemoryInfo()
     mem.MemTotal = atoi(memTotal.c_str()) ;
     return mem;
 }
+
+Memory getMemoryInfoInDocker()
+{
+    string data;
+    string memTotal;
+    string memAvailable;
+    string memUsage;
+    ifstream infile;
+    infile.open("cat /sys/fs/cgroup/memory/memory.limit_in_bytes");
+    while (infile >> data)
+    {
+        if (data == "hierarchical_memory_limit")
+        {
+            infile >> memTotal;
+        }
+        if (data == "rss")
+        {
+            infile >> memUsage;
+        }
+
+    }
+    infile.close();
+
+    Memory mem;
+    mem.MemTotal = atoi(memTotal.c_str());
+    mem.MemUsage = atoi(memTotal.c_str());
+    mem.MemAvailable = mem.MemTotal - mem.MemUsage;
+    return mem;
+}
