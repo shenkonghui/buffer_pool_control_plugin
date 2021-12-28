@@ -143,6 +143,26 @@ int exec_command(const char *query)
     return result;
 }
 
+char* show_var(const char *query)
+{
+    SHOW_VAR *show;
+    show = (SHOW_VAR *)thd->alloc(sizeof(SHOW_VAR));
+    show->type = SHOW_SYS;
+    const char *str = query;
+    // var = find_sys_var_ex(thd, str);
+    show->name = query;
+    show->value = (char *)find_sys_var_ex(thd, str, strlength(str), true, false);
+    prepare_execute_command(thd, "", "mysql");
+
+    System_variable system_var(thd, show, OPT_GLOBAL, false);
+    after_execute_command(thd);
+
+    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "res: %s", system_var.m_value_str);
+    char *str_to_ret = (char*)malloc( system_var.m_value_length);
+    memcpy(str_to_ret, system_var.m_value_str, system_var.m_value_length);
+    return str_to_ret;
+}
+
 void *mysql_heartbeat(void *p)
 {
     DBUG_ENTER("mysql_heartbeat");
@@ -153,23 +173,11 @@ void *mysql_heartbeat(void *p)
     sleep(4);
     init_thd();
 
-    SHOW_VAR *show;
-    show = (SHOW_VAR *)thd->alloc(sizeof(SHOW_VAR));
-    show->type = SHOW_SYS;
-    const char *str = "innodb_buffer_pool_size";
-    // var = find_sys_var_ex(thd, str);
-    show->name = "innodb_buffer_pool_size";
-    show->value = (char *)find_sys_var_ex(thd, str, strlength(str), true, false);
-    prepare_execute_command(thd, "", "mysql");
 
-    System_variable system_var(thd, show, OPT_GLOBAL, false);
-    after_execute_command(thd);
-
-    // my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "res: %s", system_var);
     while (1)
     {
         sleep(10);
-        // set_buffer_pool_size();
+        set_buffer_pool_size_new();
         result = time(NULL);
         localtime_r(&result, &tm_tmp);
         my_snprintf(buffer, sizeof(buffer),
@@ -186,6 +194,33 @@ void *mysql_heartbeat(void *p)
     }
 
     return 0;
+}
+
+// 自动设置buffer pool
+void set_buffer_pool_size_new()
+{
+    // 获取当前系统的内存情况
+    Memory mem = getMemoryInfo();
+
+    unsigned long long int currBufferPoolSize = 0;
+    // 查询mysql中的innodb_buffer_pool_size指标
+    char* result = show_var("innodb_buffer_pool_size");
+    currBufferPoolSize = atoll(result);
+    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "currBufferPoolSize = %llu", currBufferPoolSize);
+
+    const char *query = "set global innodb_buffer_pool_size=%llu;";
+    unsigned long long int setbufferPool = (static_cast<unsigned long long int>(mem.MemTotal * 0.7)) * 1024;
+
+    if (setbufferPool - currBufferPoolSize > 1024 * 1024 * 128 || currBufferPoolSize - setbufferPool  > 1024 * 1024 * 128) {
+        char buf[1024];
+        sprintf(buf, query, setbufferPool);
+        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, " MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
+        exec_command(buf);
+   }
+   else
+   {
+       my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "Nothing, MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
+   }
 }
 
 void set_buffer_pool_size(){
