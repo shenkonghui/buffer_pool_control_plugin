@@ -25,35 +25,42 @@
 THD* thd = NULL;
 /* 系统配置变量 */
 // 是否开启
-static bool enabled;
+static my_bool buffer_pool_control_enabled;
 // 控制时间间隔, 单位秒
-// static uint buffer_pool_control_interval;
+static uint buffer_pool_control_interval;
 // // 最小内存
-// static char *buffer_pool_control_min;
+static longlong buffer_pool_control_min;
+// // 占最大内存的比例
+static double buffer_pool_control_ratio;
+
 // // 最大内存
 // static char *buffer_pool_control_max;
 
-static MYSQL_THDVAR_BOOL(enabled,
-                         PLUGIN_VAR_RQCMDARG,
+static MYSQL_SYSVAR_BOOL(enabled, buffer_pool_control_enabled,
+                         PLUGIN_VAR_NOCMDARG,
                          "buffer_pool_control_enabled",
-                         NULL, /* check func. */
-                         NULL, /* update func. */
-                         1     /* default */
-);
+                         NULL, NULL, FALSE);
 
-// static MYSQL_THDVAR_UINT(buffer_pool_control_interval,
-//                          PLUGIN_VAR_RQCMDARG,
-//                          "buffer_pool_control_interval",
-//                          NULL, /* check func. */
-//                          NULL, /* update func. */
-//                          30 ,
-//                          10,
-//                          60 * 60 * 24,
-//                          1
-// );
+static MYSQL_SYSVAR_UINT(interval, buffer_pool_control_interval,
+                        PLUGIN_VAR_RQCMDARG,
+                        "buffer_pool_control_interval",
+                        NULL, NULL, 10, 5, 60 * 60, 0);
+
+static MYSQL_SYSVAR_LONGLONG(min, buffer_pool_control_min,
+                             PLUGIN_VAR_RQCMDARG,
+                             "buffer_pool_control_min",
+                             NULL, NULL, 1024 * 1024 * 128, 1024 * 1024 * 128, 1024 * 1024 * 1024, 0);
+
+static MYSQL_SYSVAR_DOUBLE(ratio, buffer_pool_control_ratio,
+                           PLUGIN_VAR_RQCMDARG,
+                           "buffer_pool_control_ratio",
+                           NULL, NULL, 0.7, 0.1, 0.8, 0);
 
 static struct st_mysql_sys_var *buffer_pool_control_system_variables[] = {
     MYSQL_SYSVAR(enabled),
+    MYSQL_SYSVAR(interval),
+    MYSQL_SYSVAR(min),
+    MYSQL_SYSVAR(ratio),
     NULL};
 
 struct buffer_pool_control_context
@@ -157,7 +164,7 @@ char* show_var(const char *query)
     System_variable system_var(thd, show, OPT_GLOBAL, false);
     after_execute_command(thd);
 
-    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "res: %s", system_var.m_value_str);
+    // my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "res: %s", system_var.m_value_str);
     char *str_to_ret = (char*)malloc( system_var.m_value_length);
     memcpy(str_to_ret, system_var.m_value_str, system_var.m_value_length);
     return str_to_ret;
@@ -176,8 +183,16 @@ void *mysql_heartbeat(void *p)
 
     while (1)
     {
-        sleep(10);
-        set_buffer_pool_size_new();
+        uint interval = buffer_pool_control_interval;
+        for (uint i = 0; i < interval/10; i++)
+        {
+            sleep(10);
+        }
+        if (buffer_pool_control_enabled == true)
+        {
+            set_buffer_pool_size_new();
+        }
+
         result = time(NULL);
         localtime_r(&result, &tm_tmp);
         my_snprintf(buffer, sizeof(buffer),
@@ -201,96 +216,103 @@ void set_buffer_pool_size_new()
 {
     Memory mem;
     if (getpid() == 1){
-        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "getMemoryInfoInDocker");
+        // my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "getMemoryInfoInDocker");
         mem = getMemoryInfoInDocker();
     }else{
-        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "getMemoryInfo");
+        // my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "getMemoryInfo");
         mem = getMemoryInfo();
     }
 
-    assert(mem.MemTotal > 0);
+    if (mem.MemTotal == 0){
+        my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "MemTota is 0");
+        return;
+    }
 
     long long int currBufferPoolSize = 0;
     // 查询mysql中的innodb_buffer_pool_size指标
     char* result = show_var("innodb_buffer_pool_size");
     currBufferPoolSize = atoll(result);
-    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "currBufferPoolSize = %llu", currBufferPoolSize);
+    // my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "currBufferPoolSize = %llu", currBufferPoolSize);
 
     const char *query = "set global innodb_buffer_pool_size=%llu;";
-     long long int setbufferPool = (static_cast<long long int>(mem.MemTotal * 0.7)) * 1024;
+    long long int setbufferPool = (static_cast<long long int>(mem.MemTotal * buffer_pool_control_ratio)) * 1024;
 
     if (setbufferPool - currBufferPoolSize > 1024 * 1024 * 128 || currBufferPoolSize - setbufferPool  > 1024 * 1024 * 128) {
-        char buf[1024];
-        sprintf(buf, query, setbufferPool);
-        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, " MemTotal = %lld, set bufferpool = %lld, currBufferPoolSize= %lld ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
-        exec_command(buf);
+        if (setbufferPool > buffer_pool_control_min){
+                char buf[1024];
+                sprintf(buf, query, setbufferPool);
+                my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, " MemTotal = %lld, set bufferpool = %lld, currBufferPoolSize= %lld ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
+                exec_command(buf);
+        }else{
+            my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "set buffer_pool_size[%lld] < min_buffer_pool_size[%lld]", setbufferPool, buffer_pool_control_min);
+        }
    }
    else
    {
-       my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "Nothing, MemTotal = %lld, set bufferpool = %lld, currBufferPoolSize= %lld ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
+    //    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "Nothing, MemTotal = %lld, set bufferpool = %lld, currBufferPoolSize= %lld ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
    }
 }
 
-void set_buffer_pool_size(){
-    // // 最大允许的bufffer_pool
-    // uint64_t max_innodb_buffer_pool_size = 2048ULL * 1024 * 1024;
-    // // 最小允许的bufffer_pool
-    // uint64_t min_innodb_buffer_pool_size = 128ULL * 1024 * 1024;
-    // // 内存少于256MB触发缩容防止OOM
-    // uint64_t min_avaliable_mem = 256ULL * 1024 * 1024;
+// void set_buffer_pool_size(){
+//     // // 最大允许的bufffer_pool
+//     // uint64_t max_innodb_buffer_pool_size = 2048ULL * 1024 * 1024;
+//     // // 最小允许的bufffer_pool
+//     // uint64_t min_innodb_buffer_pool_size = 128ULL * 1024 * 1024;
+//     // // 内存少于256MB触发缩容防止OOM
+//     // uint64_t min_avaliable_mem = 256ULL * 1024 * 1024;
 
-    MYSQL mysql = MYSQL();
-    MYSQL *res = mysql_init(&mysql);
-    MYSQL_RES *result;
-    MYSQL_ROW row;
-    unsigned long long int currBufferPoolSize = 0;
-    static char *opt_unix_socket = 0;
-    if (!(mysql_real_connect(res, "127.0.0.1", "root",
-                             "123456", "mysql", 3307,
-                             opt_unix_socket, 0)))
-    {
-        my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "mysql  connect failed , close");
-        mysql_close(res);
-        return;
-    }
-    Memory mem = getMemoryInfo();
+//     MYSQL mysql = MYSQL();
+//     MYSQL *res = mysql_init(&mysql);
+//     MYSQL_RES *result;
+//     MYSQL_ROW row;
+//     unsigned long long int currBufferPoolSize = 0;
+//     static char *opt_unix_socket = 0;
+//     if (!(mysql_real_connect(res, "127.0.0.1", "root",
+//                              "123456", "mysql", 3307,
+//                              opt_unix_socket, 0)))
+//     {
+//         my_plugin_log_message(&plugin_info_ptr, MY_ERROR_LEVEL, "mysql  connect failed , close");
+//         mysql_close(res);
+//         return;
+//     }
+//     Memory mem = getMemoryInfo();
 
-    // 查询当前bufferpool的值
-    const char *seletBufferPool = "select @@innodb_buffer_pool_size;";
-    mysql_query(res, seletBufferPool);
-    result = mysql_store_result(res);
-    int num_fields = mysql_num_fields(result);
-    while ((row = mysql_fetch_row(result)))
-    {
-        ulong *lengths = mysql_fetch_lengths(result);
-        for (int i = 0; i < num_fields; i++)
-        {
-            if (row[i]){
-                currBufferPoolSize = atoll(row[i]);
-                break;
-            }
-            my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "[%.*s] ", (int)lengths[i],
-                                    row[i] ? row[i] : "NULL");
-        }
-    }
+//     // 查询当前bufferpool的值
+//     const char *seletBufferPool = "select @@innodb_buffer_pool_size;";
+//     mysql_query(res, seletBufferPool);
+//     result = mysql_store_result(res);
+//     int num_fields = mysql_num_fields(result);
+//     while ((row = mysql_fetch_row(result)))
+//     {
+//         ulong *lengths = mysql_fetch_lengths(result);
+//         for (int i = 0; i < num_fields; i++)
+//         {
+//             if (row[i]){
+//                 currBufferPoolSize = atoll(row[i]);
+//                 break;
+//             }
+//             my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "[%.*s] ", (int)lengths[i],
+//                                     row[i] ? row[i] : "NULL");
+//         }
+//     }
 
-    my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "currBufferPoolSize = %llu", currBufferPoolSize);
-    mysql_free_result(result);
+//     my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "currBufferPoolSize = %llu", currBufferPoolSize);
+//     mysql_free_result(result);
 
-    // 设置bufferpool
-    const char *query = "set global innodb_buffer_pool_size=%llu;";
-    unsigned long long int setbufferPool = (static_cast<unsigned long long int>(mem.MemTotal * 0.7)) * 1024;
-    if (setbufferPool > currBufferPoolSize )
-    {
-        char buf[1024];
-        sprintf(buf, query, setbufferPool);
-        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, " MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
-        mysql_query(res, buf);
-        mysql_close(res);
-    }else{
-        my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "Nothing, MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
-    }
-}
+//     // 设置bufferpool
+//     const char *query = "set global innodb_buffer_pool_size=%llu;";
+//     unsigned long long int setbufferPool = (static_cast<unsigned long long int>(mem.MemTotal * 0.7)) * 1024;
+//     if (setbufferPool > currBufferPoolSize )
+//     {
+//         char buf[1024];
+//         sprintf(buf, query, setbufferPool);
+//         my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, " MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
+//         mysql_query(res, buf);
+//         mysql_close(res);
+//     }else{
+//         my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "Nothing, MemTotal = %llu, set bufferpool = %llu, currBufferPoolSize= %llu ", mem.MemTotal * 1024, setbufferPool, currBufferPoolSize);
+//     }
+// }
 
 static int buffer_pool_control_plugin_init(MYSQL_PLUGIN plugin_info)
 {
@@ -311,7 +333,7 @@ static int buffer_pool_control_plugin_init(MYSQL_PLUGIN plugin_info)
         my_malloc(key_memory_mysql_context,
                   sizeof(struct buffer_pool_control_context), MYF(0));
     my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL,
-                          "buffer_pool_control_enabled is %d", enabled);
+                          "buffer_pool_control_enabled is %d", buffer_pool_control_enabled);
 
     my_thread_attr_init(&attr);
     my_thread_attr_setdetachstate(&attr, MY_THREAD_CREATE_JOINABLE);

@@ -18,8 +18,9 @@ Memory getMemoryInfo()
     string memTotal;
     string memAvailable;
     ifstream infile;
-    // infile.open("/proc/meminfo");
-    infile.open("/root/meminfo");
+    infile.open("/proc/meminfo");
+    // debug
+    // infile.open("/root/meminfo");
     while (infile >> data)
     {
         if (data== "MemTotal:") {
