@@ -31,3 +31,28 @@ cp buffer_pool_control.so xxx
 mysql> INSTALL PLUGIN buffer_pool_control SONAME "buffer_pool_control.so";
 ```
 
+### 使用
+```
+# 查看配置，默认不开启
+mysql> show variables like "%buffer_pool_control%";
++------------------------------+-----------+
+| Variable_name                | Value     |
++------------------------------+-----------+
+| buffer_pool_control_enabled  | OFF        |
+| buffer_pool_control_interval | 10        |
+| buffer_pool_control_min      | 134217728 |
+| buffer_pool_control_ratio    | 0.700000  |
++------------------------------+-----------+
+#  开关
+mysql> set global  buffer_pool_control_enabled=1;
+Query OK, 0 rows affected (0.00 sec)
+
+# 查看innodb_buffer_pool_size是否调整，默认设置为内存的70%; 容器中会根据limit值进行设置
+mysql> show variables like "%innodb_buffer_pool_size%";
++-------------------------+------------+
+| Variable_name           | Value      |
++-------------------------+------------+
+| innodb_buffer_pool_size | 2887778304 |
++-------------------------+------------+
+1 row in set (0.01 sec)
+```
