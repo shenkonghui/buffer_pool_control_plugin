@@ -1,4 +1,6 @@
 #include "buffer_pool_control.h"
+#include "pfs_variable.h"
+#include <item_timefunc.h>
 #include "auth/sql_authorization.h"
 #include <my_sys.h>
 #include <mysql/plugin.h>
@@ -137,9 +139,6 @@ int exec_command(const char *query)
     prepare_execute_command(thd, query, "mysql");
     my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "sql type: %d", thd->lex->sql_command);
     result = mysql_execute_command(thd, true);
-    da = thd->get_stmt_da();
-    thd->get_stacked_da();
-
     after_execute_command(thd);
     return result;
 }
@@ -151,9 +150,22 @@ void *mysql_heartbeat(void *p)
     char buffer[HEART_STRING_BUFFER];
     time_t result;
     struct tm tm_tmp;
-    sleep(10);
+    sleep(4);
     init_thd();
-    exec_command("select @@innodb_buffer_pool_size");
+
+    SHOW_VAR *show;
+    show = (SHOW_VAR *)thd->alloc(sizeof(SHOW_VAR));
+    show->type = SHOW_SYS;
+    const char *str = "innodb_buffer_pool_size";
+    // var = find_sys_var_ex(thd, str);
+    show->name = "innodb_buffer_pool_size";
+    show->value = (char *)find_sys_var_ex(thd, str, strlength(str), true, false);
+    prepare_execute_command(thd, "", "mysql");
+
+    System_variable system_var(thd, show, OPT_GLOBAL, false);
+    after_execute_command(thd);
+
+    // my_plugin_log_message(&plugin_info_ptr, MY_INFORMATION_LEVEL, "res: %s", system_var);
     while (1)
     {
         sleep(10);

@@ -15,11 +15,12 @@
 
 INCLUDE_DIRECTORIES(
   ${CMAKE_SOURCE_DIR}/client
-  ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/mysys
+  ${CMAKE_SOURCE_DIR}/include/mysql/psi
   ${CMAKE_SOURCE_DIR}/libmysql
+   ${CMAKE_SOURCE_DIR}/sql
+   ${CMAKE_SOURCE_DIR}/storage/perfschema
 )
 
 MYSQL_ADD_PLUGIN(buffer_pool_control buffer_pool_control.cc memory.cc MODULE_ONLY TEST_ONLY MODULE_OUTPUT_NAME "buffer_pool_control")
 
-TARGET_LINK_LIBRARIES(buffer_pool_control libmysql mysys)
+TARGET_LINK_LIBRARIES(buffer_pool_control libmysql)
